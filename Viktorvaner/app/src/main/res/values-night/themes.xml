@@ -1,5 +1,0 @@
-<resources>
-    <style name="Theme.Viktorvaner" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/vv_navy</item>
-    </style>
-</resources>
