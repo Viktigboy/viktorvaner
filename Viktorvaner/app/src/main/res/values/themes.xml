@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.Viktorvaner" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/vv_dark</item>
+        <item name="android:navigationBarColor">@color/vv_dark</item>
+    </style>
+</resources>
