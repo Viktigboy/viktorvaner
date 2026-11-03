@@ -57,7 +57,7 @@ class HabitWidget : GlanceAppWidget() {
                     .padding(14.dp)
             ) {
                 Row(
-                    GlanceModifier.fillMaxWidth().clickable(actionStartActivity<MainActivity>()),
+                    GlanceModifier.fillMaxWidth().clickable(actionStartActivity(Intent(context, MainActivity::class.java))),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(GlanceModifier.defaultWeight()) {
