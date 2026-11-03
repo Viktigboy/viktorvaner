@@ -1,6 +1,7 @@
 package com.viktorvaner.app
 
 import android.content.Context
+import android.content.Intent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
