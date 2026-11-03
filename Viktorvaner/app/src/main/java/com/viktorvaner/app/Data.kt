@@ -20,7 +20,8 @@ data class Habit(
     val desc: String,
     val icon: String,
     val archived: Boolean,
-    val created: String
+    val created: String,
+    val auto: Boolean = false
 )
 
 class Store private constructor(ctx: Context) {
@@ -31,8 +32,16 @@ class Store private constructor(ctx: Context) {
         private set
     var done by mutableStateOf(setOf<String>())
         private set
+    /** For auto habits: days the user un-checked (failed). */
+    var missed by mutableStateOf(setOf<String>())
+        private set
 
     init { load() }
+
+    private fun readSet(key: String): Set<String> = try {
+        val a = JSONArray(prefs.getString(key, "[]"))
+        (0 until a.length()).map { a.getString(it) }.toSet()
+    } catch (e: Exception) { emptySet() }
 
     private fun load() {
         try {
@@ -42,14 +51,12 @@ class Store private constructor(ctx: Context) {
                 Habit(
                     o.getString("id"), o.getString("title"), o.optString("desc", ""),
                     o.optString("icon", "✅"), o.optBoolean("archived", false),
-                    o.optString("created", LocalDate.now().toString())
+                    o.optString("created", LocalDate.now().toString()), o.optBoolean("auto", false)
                 )
             }
         } catch (e: Exception) { }
-        try {
-            val a = JSONArray(prefs.getString("done", "[]"))
-            done = (0 until a.length()).map { a.getString(it) }.toSet()
-        } catch (e: Exception) { }
+        done = readSet("done")
+        missed = readSet("missed")
     }
 
     private fun save() {
@@ -58,22 +65,24 @@ class Store private constructor(ctx: Context) {
             a.put(
                 JSONObject().put("id", it.id).put("title", it.title).put("desc", it.desc)
                     .put("icon", it.icon).put("archived", it.archived).put("created", it.created)
+                    .put("auto", it.auto)
             )
         }
         prefs.edit().putString("habits", a.toString())
-            .putString("done", JSONArray(done.toList()).toString()).apply()
+            .putString("done", JSONArray(done.toList()).toString())
+            .putString("missed", JSONArray(missed.toList()).toString()).apply()
         CoroutineScope(Dispatchers.Default).launch {
             try { HabitWidget().updateAll(app) } catch (e: Exception) { }
         }
     }
 
-    fun add(title: String, desc: String, icon: String) {
-        habits = habits + Habit(UUID.randomUUID().toString(), title, desc, icon, false, LocalDate.now().toString())
+    fun add(title: String, desc: String, icon: String, auto: Boolean) {
+        habits = habits + Habit(UUID.randomUUID().toString(), title, desc, icon, false, LocalDate.now().toString(), auto)
         save()
     }
 
-    fun update(id: String, title: String, desc: String, icon: String) {
-        habits = habits.map { if (it.id == id) it.copy(title = title, desc = desc, icon = icon) else it }
+    fun update(id: String, title: String, desc: String, icon: String, auto: Boolean) {
+        habits = habits.map { if (it.id == id) it.copy(title = title, desc = desc, icon = icon, auto = auto) else it }
         save()
     }
 
@@ -85,45 +94,66 @@ class Store private constructor(ctx: Context) {
     fun delete(id: String) {
         habits = habits.filter { it.id != id }
         done = done.filter { !it.startsWith("$id|") }.toSet()
+        missed = missed.filter { !it.startsWith("$id|") }.toSet()
         save()
     }
 
-    fun isDone(id: String, d: LocalDate) = done.contains("$id|$d")
+    private fun createdOf(h: Habit): LocalDate = LocalDate.parse(h.created)
 
-    fun toggle(id: String, d: LocalDate) {
-        val k = "$id|$d"
-        done = if (done.contains(k)) done - k else done + k
+    fun isDone(h: Habit, d: LocalDate): Boolean {
+        val key = "${h.id}|$d"
+        if (!h.auto) return done.contains(key)
+        return !d.isBefore(createdOf(h)) && !d.isAfter(LocalDate.now()) && !missed.contains(key)
+    }
+
+    fun toggle(h: Habit, d: LocalDate) {
+        val key = "${h.id}|$d"
+        if (h.auto) missed = if (missed.contains(key)) missed - key else missed + key
+        else done = if (done.contains(key)) done - key else done + key
         save()
     }
 
-    private fun dates(id: String): List<LocalDate> =
-        done.filter { it.startsWith("$id|") }.map { LocalDate.parse(it.substringAfter('|')) }
+    fun toggleId(id: String, d: LocalDate) {
+        habits.firstOrNull { it.id == id }?.let { toggle(it, d) }
+    }
 
-    fun count(id: String, from: LocalDate, to: LocalDate) =
-        dates(id).count { !it.isBefore(from) && !it.isAfter(to) }
+    private fun doneDates(h: Habit): List<LocalDate> {
+        if (!h.auto) return done.filter { it.startsWith("${h.id}|") }.map { LocalDate.parse(it.substringAfter('|')) }
+        val out = ArrayList<LocalDate>()
+        var d = createdOf(h)
+        val t = LocalDate.now()
+        while (!d.isAfter(t)) {
+            if (!missed.contains("${h.id}|$d")) out.add(d)
+            d = d.plusDays(1)
+        }
+        return out
+    }
+
+    fun count(h: Habit, from: LocalDate, to: LocalDate) =
+        doneDates(h).count { !it.isBefore(from) && !it.isAfter(to) }
 
     /** Days in [from, to] that the habit existed and are not in the future. */
     fun possible(h: Habit, from: LocalDate, to: LocalDate): Int {
-        val created = LocalDate.parse(h.created)
+        val created = createdOf(h)
         val start = if (from.isAfter(created)) from else created
         val today = LocalDate.now()
         val end = if (to.isBefore(today)) to else today
         return if (end.isBefore(start)) 0 else (ChronoUnit.DAYS.between(start, end) + 1).toInt()
     }
 
-    fun streak(id: String): Int {
+    fun streak(h: Habit): Int {
         var d = LocalDate.now()
-        if (!isDone(id, d)) d = d.minusDays(1)
+        if (!isDone(h, d)) d = d.minusDays(1)
         var n = 0
-        while (isDone(id, d)) { n++; d = d.minusDays(1) }
+        while (isDone(h, d)) { n++; d = d.minusDays(1) }
         return n
     }
 
-    fun best(id: String): Int {
+    fun best(h: Habit): Int {
         var best = 0
         var cur = 0
         var prev: LocalDate? = null
-        for (d in dates(id).sorted()) {
+        for (d in doneDates(h).sorted()) {
             cur = if (prev != null && prev.plusDays(1) == d) cur + 1 else 1
             if (cur > best) best = cur
             prev = d
