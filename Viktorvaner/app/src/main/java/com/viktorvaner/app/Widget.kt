@@ -2,6 +2,7 @@ package com.viktorvaner.app
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -63,11 +64,11 @@ class HabitWidget : GlanceAppWidget() {
                 ) {
                     Column(GlanceModifier.defaultWeight()) {
                         Text(
-                            "Today",
+                            "I dag",
                             style = TextStyle(color = ColorProvider(Color.White), fontWeight = FontWeight.Bold, fontSize = 17.sp)
                         )
                         Text(
-                            today.format(DateTimeFormatter.ofPattern("EEE d MMM")),
+                            cap(today.format(DateTimeFormatter.ofPattern("EEE d. MMM", NB))),
                             style = TextStyle(color = ColorProvider(Color(0xB3FFFFFF)), fontSize = 11.sp)
                         )
                     }
@@ -84,7 +85,7 @@ class HabitWidget : GlanceAppWidget() {
                 Spacer(GlanceModifier.height(8.dp))
                 if (list.isEmpty()) {
                     Text(
-                        "Open Viktorvaner to add habits",
+                        "Åpne Viktorvaner for å legge til vaner",
                         style = TextStyle(color = ColorProvider(Color(0xB3FFFFFF)), fontSize = 13.sp)
                     )
                 } else {
@@ -93,7 +94,18 @@ class HabitWidget : GlanceAppWidget() {
                             val d = store.isDone(h, today)
                             Row(
                                 GlanceModifier.fillMaxWidth().padding(vertical = 4.dp)
-                                    .clickable(actionRunCallback<ToggleAction>(actionParametersOf(ToggleAction.IdKey to h.id))),
+                                    .clickable(
+                                        when {
+                                            // Journal: open the app to write. Unchecking an auto habit: open the app to explain why.
+                                            h.journal -> actionStartActivity(
+                                                Intent(context, MainActivity::class.java).setData(Uri.parse("viktorvaner://journal"))
+                                            )
+                                            h.auto && d -> actionStartActivity(
+                                                Intent(context, MainActivity::class.java).setData(Uri.parse("viktorvaner://fail/${h.id}"))
+                                            )
+                                            else -> actionRunCallback<ToggleAction>(actionParametersOf(ToggleAction.IdKey to h.id))
+                                        }
+                                    ),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Box(

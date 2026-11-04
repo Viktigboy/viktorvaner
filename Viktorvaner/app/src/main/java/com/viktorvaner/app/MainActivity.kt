@@ -1,7 +1,9 @@
 package com.viktorvaner.app
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.content.Intent
+import androidx.activity.compose.BackHandler
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.animateColorAsState
@@ -76,6 +78,17 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.zIndex
 import java.text.BreakIterator
 import java.time.LocalDate
 import java.time.YearMonth
@@ -106,12 +119,41 @@ val P: Pal
 
 val QUICK_EMOJI = listOf("✅", "💧", "🏃", "📚", "🧘", "💪", "😴", "🥗", "💊", "🚭", "✍️", "🧠")
 
-class MainActivity : ComponentActivity() {
+/** Things the home-screen widget (or a lock event) asks the app to do. */
+object Pending {
+    var failId by mutableStateOf<String?>(null)
+    var journal by mutableStateOf(false)
+    var lockTick by mutableIntStateOf(0)
+}
+
+class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val store = Store.get(this)
+        handle(intent)
+        store.syncCloud()
         setContent { App(store) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handle(intent)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        Pending.lockTick++
+    }
+
+    private fun handle(i: Intent?) {
+        val d = i?.data ?: return
+        if (d.scheme != "viktorvaner") return
+        when (d.host) {
+            "fail" -> Pending.failId = d.lastPathSegment
+            "journal" -> Pending.journal = true
+        }
     }
 }
 
@@ -192,6 +234,10 @@ fun Ic(kind: String, tint: Color, dp: Dp = 22.dp, stroke: Float = 1.8f) {
             "up" -> {
                 drawLine(tint, o(.5f, .8f), o(.5f, .22f), strokeWidth = sw, cap = StrokeCap.Round)
                 drawPath(poly(.3f to .42f, .5f to .22f, .7f to .42f), tint, style = st)
+            }
+            "book" -> {
+                drawPath(poly(.5f to .26f, .3f to .2f, .14f to .24f, .14f to .76f, .3f to .72f, .5f to .82f, close = true), tint, style = st)
+                drawPath(poly(.5f to .26f, .7f to .2f, .86f to .24f, .86f to .76f, .7f to .72f, .5f to .82f, close = true), tint, style = st)
             }
             else -> {}
         }
@@ -353,23 +399,60 @@ fun lastGrapheme(s: String): String {
     return if (start >= 0 && start < end) s.substring(start, end) else s
 }
 
+
 // ───────────────────────── App shell ─────────────────────────
 
 @Composable
 fun App(s: Store) {
     val pal = if (isSystemInDarkTheme()) DarkPal else LightPal
     CompositionLocalProvider(LocalPal provides pal) {
+        val ctx = LocalContext.current
         var tab by remember { mutableIntStateOf(0) }
         var showAdd by remember { mutableStateOf(false) }
         var editing by remember { mutableStateOf<Habit?>(null) }
         var menuFor by remember { mutableStateOf<Habit?>(null) }
         var deleteFor by remember { mutableStateOf<Habit?>(null) }
+        var privateOpen by remember { mutableStateOf(false) }
+        var journalDate by remember { mutableStateOf<LocalDate?>(null) }
+        var failFor by remember { mutableStateOf<Pair<Habit, LocalDate>?>(null) }
+
+        // Reading an existing journal entry needs fingerprint. Writing a new one does not.
+        fun openJournal(d: LocalDate) {
+            if (s.hasEntry(d)) authenticate(ctx, "Åpne journal") { journalDate = d }
+            else journalDate = d
+        }
+
+        fun openPrivate() {
+            authenticate(ctx, "Åpne privat område") { privateOpen = true }
+        }
+
+        val pendingFail = Pending.failId
+        LaunchedEffect(pendingFail) {
+            if (pendingFail != null) {
+                val h = s.habits.firstOrNull { it.id == pendingFail }
+                val today = LocalDate.now()
+                if (h != null && h.auto && s.isDone(h, today)) failFor = h to today
+                Pending.failId = null
+            }
+        }
+        val pendingJournal = Pending.journal
+        LaunchedEffect(pendingJournal) {
+            if (pendingJournal) {
+                openJournal(LocalDate.now())
+                Pending.journal = false
+            }
+        }
+        val lock = Pending.lockTick
+        LaunchedEffect(lock) { privateOpen = false }
 
         Box(Modifier.fillMaxSize().background(pal.bg).systemBarsPadding()) {
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.weight(1f)) {
                     when (tab) {
-                        0 -> TodayScreen(s) { menuFor = it }
+                        0 -> TodayScreen(
+                            s, onMenu = { menuFor = it }, onJournal = { openJournal(it) },
+                            onPrivate = { openPrivate() }, onUncheck = { h, d -> failFor = h to d }
+                        )
                         1 -> StatsScreen(s)
                         else -> ArchiveScreen(s) { deleteFor = it }
                     }
@@ -386,6 +469,11 @@ fun App(s: Store) {
                     contentAlignment = Alignment.Center
                 ) { Ic("plus", Color.White, 26.dp, 2.4f) }
             }
+            if (privateOpen) {
+                Box(Modifier.fillMaxSize().background(pal.bg)) {
+                    PrivateScreen(s) { privateOpen = false }
+                }
+            }
         }
 
         if (showAdd) HabitDialog(
@@ -398,6 +486,17 @@ fun App(s: Store) {
                 onSave = { t, d, i, a -> s.update(h.id, t, d, i, a); editing = null }
             )
         }
+        journalDate?.let { d -> JournalEditor(s, d) { journalDate = null } }
+        failFor?.let { (h, d) ->
+            FailureDialog(
+                h, d, onDismiss = { failFor = null },
+                onSave = { text ->
+                    s.addFailure(h, d, text)
+                    s.toggle(h, d)
+                    failFor = null
+                }
+            )
+        }
         menuFor?.let { h ->
             Sheet(onDismiss = { menuFor = null }) {
                 Row(Modifier.padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -405,20 +504,20 @@ fun App(s: Store) {
                     Gap(w = 12)
                     T(h.title, 17, FontWeight.SemiBold, maxLines = 1)
                 }
-                SheetRow("edit", "Edit") { menuFor = null; editing = h }
-                SheetRow("archive", "Archive") { s.setArchived(h.id, true); menuFor = null }
-                SheetRow("trash", "Delete", pal.danger) { menuFor = null; deleteFor = h }
+                SheetRow("edit", "Rediger") { menuFor = null; editing = h }
+                SheetRow("archive", "Arkiver") { s.setArchived(h.id, true); menuFor = null }
+                SheetRow("trash", "Slett", pal.danger) { menuFor = null; deleteFor = h }
             }
         }
         deleteFor?.let { h ->
             Sheet(onDismiss = { deleteFor = null }) {
-                T("Delete habit?", 20, FontWeight.SemiBold)
+                T("Slette vanen?", 20, FontWeight.SemiBold)
                 Gap(h = 8)
-                T("\"${h.title}\" and all of its history will be permanently removed.", 14, color = pal.sub)
+                T("«${h.title}» og hele historikken fjernes for godt.", 14, color = pal.sub)
                 Gap(h = 20)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    PillButton("Cancel", Modifier.weight(1f), filled = false) { deleteFor = null }
-                    PillButton("Delete", Modifier.weight(1f), color = pal.danger) { s.delete(h.id); deleteFor = null }
+                    PillButton("Avbryt", Modifier.weight(1f), filled = false) { deleteFor = null }
+                    PillButton("Slett", Modifier.weight(1f), color = pal.danger) { s.delete(h.id); deleteFor = null }
                 }
             }
         }
@@ -430,7 +529,7 @@ fun BottomBar(tab: Int, onTab: (Int) -> Unit) {
     Column {
         Box(Modifier.fillMaxWidth().height(1.dp).background(P.border))
         Row(Modifier.fillMaxWidth().height(64.dp).background(P.bg)) {
-            listOf("Today" to "today", "Stats" to "stats", "Archive" to "archive").forEachIndexed { i, (label, kind) ->
+            listOf("I dag" to "today", "Statistikk" to "stats", "Arkiv" to "archive").forEachIndexed { i, (label, kind) ->
                 val c = if (tab == i) P.accent else P.sub
                 Column(
                     Modifier.weight(1f).fillMaxHeight().tap { onTab(i) },
@@ -445,10 +544,14 @@ fun BottomBar(tab: Int, onTab: (Int) -> Unit) {
     }
 }
 
-// ───────────────────────── Today ─────────────────────────
+// ───────────────────────── I dag ─────────────────────────
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun TodayScreen(s: Store, onMenu: (Habit) -> Unit) {
+fun TodayScreen(
+    s: Store, onMenu: (Habit) -> Unit, onJournal: (LocalDate) -> Unit,
+    onPrivate: () -> Unit, onUncheck: (Habit, LocalDate) -> Unit
+) {
     var date by remember { mutableStateOf(LocalDate.now()) }
     val today = LocalDate.now()
     val list = s.habits.filter { !it.archived }
@@ -456,7 +559,13 @@ fun TodayScreen(s: Store, onMenu: (Habit) -> Unit) {
     val monday = date.minusDays((date.dayOfWeek.value - 1).toLong())
     val canNext = !monday.plusWeeks(1).isAfter(today)
 
+    val listState = rememberLazyListState()
+    var dragId by remember { mutableStateOf<String?>(null) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val haptic = LocalHapticFeedback.current
+
     LazyColumn(
+        state = listState,
         contentPadding = PaddingValues(20.dp, 20.dp, 20.dp, 160.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -464,14 +573,22 @@ fun TodayScreen(s: Store, onMenu: (Habit) -> Unit) {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        T(if (date == today) "Today" else date.format(DateTimeFormatter.ofPattern("EEEE")), 36, FontWeight.SemiBold, spacing = -1f)
-                        T(date.format(DateTimeFormatter.ofPattern("d MMMM yyyy")), 14, color = P.sub)
+                        T(
+                            if (date == today) "I dag" else cap(date.format(DateTimeFormatter.ofPattern("EEEE", NB))),
+                            36, FontWeight.SemiBold, spacing = -1f
+                        )
+                        T(date.format(DateTimeFormatter.ofPattern("d. MMMM yyyy", NB)), 14, color = P.sub)
                     }
                     IconBtn("left") { date = date.minusWeeks(1) }
                     IconBtn("right", canNext) {
                         val n = date.plusWeeks(1)
                         date = if (n.isAfter(today)) today else n
                     }
+                    Gap(w = 6)
+                    Box(
+                        Modifier.size(40.dp).clip(CircleShape).background(P.accentSoft).tap { onPrivate() },
+                        contentAlignment = Alignment.Center
+                    ) { Ic("book", P.accent, 21.dp) }
                 }
                 Gap(h = 16)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -486,11 +603,15 @@ fun TodayScreen(s: Store, onMenu: (Habit) -> Unit) {
                                 .tap(!future) { date = d }.padding(vertical = 10.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            T(d.dayOfWeek.getDisplayName(DayStyle.NARROW, Locale.getDefault()), 11, FontWeight.Medium,
-                                if (sel) Color.White.copy(alpha = 0.75f) else P.sub)
+                            T(
+                                cap(d.dayOfWeek.getDisplayName(DayStyle.NARROW, NB)), 11, FontWeight.Medium,
+                                if (sel) Color.White.copy(alpha = 0.75f) else P.sub
+                            )
                             Gap(h = 2)
-                            T("${d.dayOfMonth}", 16, FontWeight.SemiBold,
-                                if (sel) Color.White else if (future) P.sub.copy(alpha = 0.4f) else P.text)
+                            T(
+                                "${d.dayOfMonth}", 16, FontWeight.SemiBold,
+                                if (sel) Color.White else if (future) P.sub.copy(alpha = 0.4f) else P.text
+                            )
                         }
                     }
                 }
@@ -504,23 +625,85 @@ fun TodayScreen(s: Store, onMenu: (Habit) -> Unit) {
             }
         }
         if (list.isEmpty()) {
-            item { Empty("No habits yet", "Tap + to add your first habit.") }
+            item { Empty("Ingen vaner ennå", "Trykk + for å legge til din første vane.") }
         } else {
-            items(list, key = { it.id }) { h -> HabitCard(s, h, date, onMenu) }
+            items(list, key = { it.id }) { h ->
+                val dragging = dragId == h.id
+                val base = if (dragging) {
+                    Modifier.zIndex(1f).graphicsLayer {
+                        translationY = dragOffset
+                        scaleX = 1.02f
+                        scaleY = 1.02f
+                    }
+                } else Modifier.animateItemPlacement()
+                HabitCard(
+                    s, h, date,
+                    modifier = base.pointerInput(h.id) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = {
+                                dragId = h.id
+                                dragOffset = 0f
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                dragOffset += amount.y
+                                val vis = listState.layoutInfo.visibleItemsInfo
+                                val info = vis.firstOrNull { it.key == h.id }
+                                if (info != null) {
+                                    val center = info.offset + info.size / 2f + dragOffset
+                                    val target = vis.firstOrNull {
+                                        it.key is String && it.key != h.id &&
+                                            center >= it.offset && center <= it.offset + it.size
+                                    }
+                                    if (target != null) {
+                                        s.reorder(h.id, target.key as String)
+                                        val newOff = if (target.index > info.index) {
+                                            target.offset + target.size - info.size
+                                        } else target.offset
+                                        dragOffset += (info.offset - newOff).toFloat()
+                                    }
+                                }
+                            },
+                            onDragEnd = {
+                                dragId = null
+                                dragOffset = 0f
+                                s.commitOrder()
+                            },
+                            onDragCancel = {
+                                dragId = null
+                                dragOffset = 0f
+                                s.commitOrder()
+                            }
+                        )
+                    },
+                    onClick = {
+                        when {
+                            h.journal -> onJournal(date)
+                            h.auto && s.isDone(h, date) -> onUncheck(h, date)
+                            else -> s.toggle(h, date)
+                        }
+                    },
+                    onMenu = onMenu
+                )
+            }
         }
     }
 }
 
 @Composable
-fun HabitCard(s: Store, h: Habit, date: LocalDate, onMenu: (Habit) -> Unit) {
+fun HabitCard(
+    s: Store, h: Habit, date: LocalDate, modifier: Modifier,
+    onClick: () -> Unit, onMenu: (Habit) -> Unit
+) {
     val on = s.isDone(h, date)
     val streak = s.streak(h)
     val shape = RoundedCornerShape(22.dp)
     Row(
-        Modifier.fillMaxWidth().clip(shape).background(P.card)
+        modifier.fillMaxWidth().clip(shape).background(P.card)
             .border(1.dp, if (on) P.accent.copy(alpha = 0.4f) else P.border, shape)
-            .tap { s.toggle(h, date) }
-            .padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
+            .tap { onClick() }
+            .padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = if (h.journal) 14.dp else 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         EmojiTile(h.icon)
@@ -531,22 +714,27 @@ fun HabitCard(s: Store, h: Habit, date: LocalDate, onMenu: (Habit) -> Unit) {
             if (streak > 0 || h.auto) {
                 Gap(h = 5)
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (streak > 0) T("$streak day streak", 12, FontWeight.Medium, P.accent)
+                    if (streak > 0) T("$streak ${if (streak == 1) "dag" else "dager"} på rad", 12, FontWeight.Medium, P.accent)
                     if (streak > 0 && h.auto) Gap(w = 8)
                     if (h.auto) Pill("AUTO")
                 }
             }
         }
         CheckCircle(on)
-        Gap(w = 2)
-        IconBtn("more") { onMenu(h) }
+        if (!h.journal) {
+            Gap(w = 2)
+            IconBtn("more") { onMenu(h) }
+        }
     }
 }
 
-// ───────────────────────── Add / edit ─────────────────────────
+// ───────────────────────── Ny / rediger ─────────────────────────
 
 @Composable
-fun Field(label: String, value: String, onChange: (String) -> Unit, single: Boolean = true, minH: Dp = 0.dp) {
+fun Field(
+    label: String, value: String, onChange: (String) -> Unit, single: Boolean = true,
+    minH: Dp = 0.dp, placeholder: String = ""
+) {
     Column {
         T(label, 12, FontWeight.Medium, P.sub)
         Gap(h = 6)
@@ -554,6 +742,7 @@ fun Field(label: String, value: String, onChange: (String) -> Unit, single: Bool
             Modifier.fillMaxWidth().heightIn(min = minH).clip(RoundedCornerShape(14.dp)).background(P.bg)
                 .border(1.dp, P.border, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 13.dp)
         ) {
+            if (value.isEmpty() && placeholder.isNotEmpty()) T(placeholder, 16, color = P.sub.copy(alpha = 0.6f), maxLines = 1)
             BasicTextField(
                 value = value, onValueChange = onChange, singleLine = single, maxLines = if (single) 1 else 4,
                 textStyle = TextStyle(color = P.text, fontSize = 16.sp),
@@ -575,7 +764,7 @@ fun HabitDialog(h: Habit?, onDismiss: () -> Unit, onSave: (String, String, Strin
 
     Sheet(onDismiss = onDismiss) {
         Column(Modifier.verticalScroll(rememberScrollState())) {
-            T(if (h == null) "New habit" else "Edit habit", 22, FontWeight.SemiBold, spacing = -0.5f)
+            T(if (h == null) "Ny vane" else "Rediger vane", 22, FontWeight.SemiBold, spacing = -0.5f)
             Gap(h = 18)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
@@ -594,8 +783,8 @@ fun HabitDialog(h: Habit?, onDismiss: () -> Unit, onSave: (String, String, Strin
                 }
                 Gap(w = 14)
                 Column {
-                    T("Icon", 15, FontWeight.SemiBold)
-                    T("Tap the tile, then pick any emoji from your keyboard.", 12, color = P.sub)
+                    T("Ikon", 15, FontWeight.SemiBold)
+                    T("Trykk på ruten, og velg en emoji fra tastaturet.", 12, color = P.sub)
                 }
             }
             Gap(h = 12)
@@ -611,22 +800,22 @@ fun HabitDialog(h: Habit?, onDismiss: () -> Unit, onSave: (String, String, Strin
                 }
             }
             Gap(h = 18)
-            Field("Title", title, { title = it })
+            Field("Tittel", title, { title = it })
             Gap(h = 14)
-            Field("Description (optional)", desc, { desc = it }, single = false, minH = 76.dp)
+            Field("Beskrivelse (valgfritt)", desc, { desc = it }, single = false, minH = 76.dp)
             Gap(h = 18)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    T("Auto-check every day", 15, FontWeight.Medium)
-                    T("Counts as done each day. Tap to unmark on days you miss.", 12, color = P.sub)
+                    T("Kryss av automatisk hver dag", 15, FontWeight.Medium)
+                    T("Teller som gjort hver dag. Fjern krysset på dager du bommer, og skriv hva som skjedde.", 12, color = P.sub)
                 }
                 Gap(w = 12)
                 Toggle(auto) { auto = it }
             }
             Gap(h = 22)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                PillButton("Cancel", Modifier.weight(1f), filled = false, onClick = onDismiss)
-                PillButton("Save", Modifier.weight(1f), enabled = title.isNotBlank()) {
+                PillButton("Avbryt", Modifier.weight(1f), filled = false, onClick = onDismiss)
+                PillButton("Lagre", Modifier.weight(1f), enabled = title.isNotBlank()) {
                     onSave(title.trim(), desc.trim(), icon, auto)
                 }
             }
@@ -634,7 +823,7 @@ fun HabitDialog(h: Habit?, onDismiss: () -> Unit, onSave: (String, String, Strin
     }
 }
 
-// ───────────────────────── Stats ─────────────────────────
+// ───────────────────────── Statistikk ─────────────────────────
 
 @Composable
 fun StatsScreen(s: Store) {
@@ -658,15 +847,17 @@ fun StatsScreen(s: Store) {
     ) {
         item {
             Column {
-                T("Stats", 36, FontWeight.SemiBold, spacing = -1f)
+                T("Statistikk", 36, FontWeight.SemiBold, spacing = -1f)
                 Gap(h = 16)
-                Segmented(listOf("Month", "Year", "All time"), mode) { mode = it }
+                Segmented(listOf("Måned", "År", "Totalt"), mode) { mode = it }
                 Gap(h = 10)
                 when (mode) {
                     0 -> Row(verticalAlignment = Alignment.CenterVertically) {
                         IconBtn("left") { month = month.minusMonths(1) }
-                        T(month.format(DateTimeFormatter.ofPattern("MMMM yyyy")), 16, FontWeight.SemiBold,
-                            modifier = Modifier.weight(1f), align = TextAlign.Center)
+                        T(
+                            cap(month.format(DateTimeFormatter.ofPattern("MMMM yyyy", NB))), 16, FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f), align = TextAlign.Center
+                        )
                         IconBtn("right", month.isBefore(YearMonth.now())) { month = month.plusMonths(1) }
                     }
                     1 -> Row(verticalAlignment = Alignment.CenterVertically) {
@@ -679,7 +870,7 @@ fun StatsScreen(s: Store) {
             }
         }
         if (s.habits.isEmpty()) {
-            item { Empty("Nothing to show yet", "Add a habit to start tracking.") }
+            item { Empty("Ingenting å vise ennå", "Legg til en vane for å begynne å følge den.") }
         } else {
             item {
                 val shape = RoundedCornerShape(24.dp)
@@ -690,9 +881,9 @@ fun StatsScreen(s: Store) {
                     Ring(if (totalPossible == 0) 0f else totalDone / totalPossible.toFloat(), 96.dp, "${pct(totalDone, totalPossible)}%")
                     Gap(w = 18)
                     Column {
-                        T("Completion", 13, FontWeight.Medium, P.sub)
-                        T("$totalDone of $totalPossible", 22, FontWeight.SemiBold, spacing = -0.5f)
-                        T("check-ins", 13, color = P.sub)
+                        T("Gjennomføring", 13, FontWeight.Medium, P.sub)
+                        T("$totalDone av $totalPossible", 22, FontWeight.SemiBold, spacing = -0.5f)
+                        T("avkrysninger", 13, color = P.sub)
                     }
                 }
             }
@@ -712,8 +903,8 @@ fun StatCard(s: Store, h: Habit, mode: Int, month: YearMonth, year: Int, from: L
             EmojiTile(h.icon, 40.dp)
             Gap(w = 12)
             Column(Modifier.weight(1f)) {
-                T(h.title + if (h.archived) "  ·  archived" else "", 16, FontWeight.SemiBold, maxLines = 1)
-                T(if (mode == 2) "$c total check-ins" else "$c of $p days", 12, color = P.sub)
+                T(h.title + if (h.archived) "  ·  arkivert" else "", 16, FontWeight.SemiBold, maxLines = 1)
+                T(if (mode == 2) "$c avkrysninger totalt" else "$c av $p dager", 12, color = P.sub)
             }
             T("${pct(c, p)}%", 20, FontWeight.SemiBold, P.accent)
         }
@@ -759,14 +950,14 @@ fun StatCard(s: Store, h: Habit, mode: Int, month: YearMonth, year: Int, from: L
             }
             else -> {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatBlock("${s.streak(h)}", "Current", Modifier.weight(1f))
-                    StatBlock("${s.best(h)}", "Best", Modifier.weight(1f))
-                    StatBlock("$c", "Total", Modifier.weight(1f))
+                    StatBlock("${s.streak(h)}", "Nå", Modifier.weight(1f))
+                    StatBlock("${s.best(h)}", "Beste", Modifier.weight(1f))
+                    StatBlock("$c", "Totalt", Modifier.weight(1f))
                 }
                 Gap(h = 12)
                 ProgressBar(if (p == 0) 0f else c / p.toFloat(), Modifier.fillMaxWidth())
                 Gap(h = 6)
-                T("Success rate since ${h.created}", 12, color = P.sub)
+                T("Suksessrate siden ${h.created}", 12, color = P.sub)
             }
         }
     }
@@ -780,7 +971,7 @@ fun StatBlock(value: String, label: String, modifier: Modifier) {
     }
 }
 
-// ───────────────────────── Archive ─────────────────────────
+// ───────────────────────── Arkiv ─────────────────────────
 
 @Composable
 fun ArchiveScreen(s: Store, onDelete: (Habit) -> Unit) {
@@ -792,13 +983,13 @@ fun ArchiveScreen(s: Store, onDelete: (Habit) -> Unit) {
     ) {
         item {
             Column {
-                T("Archive", 36, FontWeight.SemiBold, spacing = -1f)
-                T("Paused habits. Restore them any time.", 14, color = P.sub)
+                T("Arkiv", 36, FontWeight.SemiBold, spacing = -1f)
+                T("Pausede vaner. Gjenopprett dem når som helst.", 14, color = P.sub)
                 Gap(h = 8)
             }
         }
         if (list.isEmpty()) {
-            item { Empty("Nothing archived", "Archived habits will show up here.") }
+            item { Empty("Ingenting arkivert", "Arkiverte vaner vises her.") }
         } else {
             items(list, key = { it.id }) { h ->
                 Column(Modifier.fillMaxWidth().clip(shape).background(P.card).border(1.dp, P.border, shape).padding(14.dp)) {
@@ -812,8 +1003,8 @@ fun ArchiveScreen(s: Store, onDelete: (Habit) -> Unit) {
                     }
                     Gap(h = 14)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        PillButton("Restore", Modifier.weight(1f)) { s.setArchived(h.id, false) }
-                        PillButton("Delete", Modifier.weight(1f), filled = false, color = P.danger) { onDelete(h) }
+                        PillButton("Gjenopprett", Modifier.weight(1f)) { s.setArchived(h.id, false) }
+                        PillButton("Slett", Modifier.weight(1f), filled = false, color = P.danger) { onDelete(h) }
                     }
                 }
             }
