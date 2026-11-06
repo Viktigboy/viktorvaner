@@ -247,7 +247,7 @@ fun MiniBtn(kind: String, size: Int = 30, enabled: Boolean = true, onClick: () -
 fun Stepper(value: Int, onChange: (Int) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         MiniBtn("minus", 40, value > 1) { onChange(value - 1) }
-        T("$value", 20, FontWeight.SemiBold, Modifier.padding(horizontal = 18.dp), align = TextAlign.Center)
+        T("$value", 20, FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 18.dp), align = TextAlign.Center)
         MiniBtn("plus", 40, value < 999) { onChange(value + 1) }
     }
 }
@@ -518,7 +518,7 @@ fun FreezerRow(
                 T("Antall", 12, color = P.sub)
                 Gap(w = 10)
                 MiniBtn("minus", 30, item.qty > 1) { onQty(-1) }
-                T("${item.qty}", 15, FontWeight.SemiBold, Modifier.padding(horizontal = 12.dp))
+                T("${item.qty}", 15, FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 12.dp))
                 MiniBtn("plus", 30, item.qty < 999) { onQty(1) }
             }
         }
