@@ -93,9 +93,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Keyboard capitalises the first letter of every sentence, like other apps. */
+val CAPS = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences)
 
 val LIST_EMOJI = listOf("🛒", "🥦", "🍞", "🥛", "🍖", "🧴", "🏠", "🎉", "💊", "🐕", "🍷", "🧁")
 
@@ -123,6 +127,7 @@ fun Field(label: String, value: String, placeholder: String = "", onChange: (Str
             BasicTextField(
                 value = value, onValueChange = onChange, singleLine = true,
                 textStyle = TextStyle(color = P.text, fontSize = 16.sp),
+                keyboardOptions = CAPS,
                 cursorBrush = SolidColor(P.accent), modifier = Modifier.fillMaxWidth()
             )
         }
@@ -164,8 +169,7 @@ fun App(shared: Repo, local: LocalRepo) {
                 if (tab == 2) {
                     FreezerScreen(
                         r = shared, tab = tab,
-                        onTab = { tab = it; openId = null },
-                        onBackground = { showBg = true }
+                        onTab = { tab = it; openId = null }
                     )
                 } else {
                     val backend: Backend = if (tab == 0) shared else local
@@ -360,7 +364,7 @@ fun DetailScreen(r: Backend, list: ShopList, isShared: Boolean, onBack: () -> Un
                     value = text, onValueChange = { text = it }, singleLine = true,
                     textStyle = TextStyle(color = P.text, fontSize = 16.sp),
                     cursorBrush = SolidColor(P.accent),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { submit() }),
                     modifier = Modifier.fillMaxWidth()
                 )

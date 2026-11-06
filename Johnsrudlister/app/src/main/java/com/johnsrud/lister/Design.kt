@@ -199,6 +199,8 @@ fun Ic(kind: String, tint: Color, dp: Dp = 22.dp, stroke: Float = 1.8f) {
                 drawCircle(tint, radius = .14f * w, center = o(.5f, .56f), style = st)
                 drawPath(poly(.36f to .3f, .42f to .2f, .58f to .2f, .64f to .3f), tint, style = st)
             }
+            "minus" -> drawLine(tint, o(.2f, .5f), o(.8f, .5f), strokeWidth = sw, cap = StrokeCap.Round)
+            "down" -> drawPath(poly(.22f to .38f, .5f to .66f, .78f to .38f), tint, style = st)
             else -> {}
         }
     }

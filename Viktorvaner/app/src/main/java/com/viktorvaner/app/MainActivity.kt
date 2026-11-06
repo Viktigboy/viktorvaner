@@ -40,6 +40,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -132,8 +133,12 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         val store = Store.get(this)
         handle(intent)
-        store.syncCloud()
         setContent { App(store) }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        Store.get(this).syncCloud()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -413,13 +418,23 @@ fun App(s: Store) {
         var menuFor by remember { mutableStateOf<Habit?>(null) }
         var deleteFor by remember { mutableStateOf<Habit?>(null) }
         var privateOpen by remember { mutableStateOf(false) }
-        var journalDate by remember { mutableStateOf<LocalDate?>(null) }
+        var noteDate by remember { mutableStateOf<LocalDate?>(null) }
+        var showBackup by remember { mutableStateOf(false) }
         var failFor by remember { mutableStateOf<Pair<Habit, LocalDate>?>(null) }
 
-        // Reading an existing journal entry needs fingerprint. Writing a new one does not.
+        // Reading existing notes needs fingerprint. Writing the first note of a day does not.
         fun openJournal(d: LocalDate) {
-            if (s.hasEntry(d)) authenticate(ctx, "Åpne journal") { journalDate = d }
-            else journalDate = d
+            if (s.hasEntry(d)) authenticate(ctx, "Åpne journal") { privateOpen = true }
+            else noteDate = d
+        }
+
+        // First start: create the recovery code, show it once, and start backing up.
+        LaunchedEffect(Unit) {
+            if (s.cloud.available) {
+                s.cloud.ensureCode()
+                if (!s.cloud.seen) showBackup = true
+                s.syncCloud()
+            }
         }
 
         fun openPrivate() {
@@ -474,7 +489,19 @@ fun App(s: Store) {
                     PrivateScreen(s) { privateOpen = false }
                 }
             }
+            noteDate?.let { d -> NoteEditor(s, null, d) { noteDate = null } }
+            failFor?.let { (h, d) ->
+                FailureDialog(
+                    h, d, onDismiss = { failFor = null },
+                    onSave = { text ->
+                        s.addFailure(h, d, text)
+                        s.toggle(h, d)
+                        failFor = null
+                    }
+                )
+            }
         }
+        if (showBackup) BackupSheet(s) { showBackup = false }
 
         if (showAdd) HabitDialog(
             h = null, onDismiss = { showAdd = false },
@@ -484,17 +511,6 @@ fun App(s: Store) {
             HabitDialog(
                 h = h, onDismiss = { editing = null },
                 onSave = { t, d, i, a -> s.update(h.id, t, d, i, a); editing = null }
-            )
-        }
-        journalDate?.let { d -> JournalEditor(s, d) { journalDate = null } }
-        failFor?.let { (h, d) ->
-            FailureDialog(
-                h, d, onDismiss = { failFor = null },
-                onSave = { text ->
-                    s.addFailure(h, d, text)
-                    s.toggle(h, d)
-                    failFor = null
-                }
             )
         }
         menuFor?.let { h ->
@@ -733,7 +749,7 @@ fun HabitCard(
 @Composable
 fun Field(
     label: String, value: String, onChange: (String) -> Unit, single: Boolean = true,
-    minH: Dp = 0.dp, placeholder: String = ""
+    minH: Dp = 0.dp, placeholder: String = "", caps: Boolean = true
 ) {
     Column {
         T(label, 12, FontWeight.Medium, P.sub)
@@ -746,6 +762,7 @@ fun Field(
             BasicTextField(
                 value = value, onValueChange = onChange, singleLine = single, maxLines = if (single) 1 else 4,
                 textStyle = TextStyle(color = P.text, fontSize = 16.sp),
+                keyboardOptions = if (caps) CAPS else KeyboardOptions.Default,
                 cursorBrush = SolidColor(P.accent), modifier = Modifier.fillMaxWidth()
             )
         }

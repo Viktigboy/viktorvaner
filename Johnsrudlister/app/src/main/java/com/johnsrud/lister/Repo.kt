@@ -28,8 +28,10 @@ data class ShopList(val id: String, val name: String, val icon: String, val crea
 data class Item(val id: String, val listId: String, val name: String, val done: Boolean, val created: Long)
 data class FreezerItem(
     val id: String, val name: String, val category: String,
-    val expiry: LocalDate, val added: Long, val photo: String
+    val expiry: LocalDate?, val qty: Int, val added: Long, val photo: String
 )
+
+data class FreezerCat(val id: String, val name: String, val emoji: String)
 
 /** Same screens work for shared (cloud) and private (this phone only) lists. */
 interface Backend {
@@ -61,7 +63,8 @@ class Repo private constructor(ctx: Context) : Backend {
     private var bgStamp = -1L
     private var handleKey = ""
     private var _freezer by mutableStateOf(listOf<FreezerItem>())
-    private var _cats by mutableStateOf(listOf<String>())
+    private var _cats by mutableStateOf(listOf<FreezerCat>())
+    private var seeding = false
 
     var background by mutableStateOf<ImageBitmap?>(null)
         private set
@@ -69,7 +72,11 @@ class Repo private constructor(ctx: Context) : Backend {
     // Handleliste always exists, is always first, and cannot be renamed or deleted.
     override val lists: List<ShopList> get() = listOf(HANDLE) + _lists
     val freezer: List<FreezerItem> get() = _freezer
-    val customCategories: List<String> get() = _cats
+    val categories: List<FreezerCat> get() = _cats
+
+    /** The emoji for a category name (falls back to a default for unknown names). */
+    fun emojiFor(name: String): String =
+        _cats.firstOrNull { it.name.equals(name, true) }?.emoji ?: catEmoji(name)
     override val items: List<Item> get() = _items
     override val loaded: Boolean get() = _loaded
     override val error: String? get() = _error
@@ -118,7 +125,8 @@ class Repo private constructor(ctx: Context) : Backend {
                     id = d.id,
                     name = d.getString("name") ?: "",
                     category = d.getString("category") ?: "",
-                    expiry = LocalDate.ofEpochDay(d.getLong("expiryDay") ?: LocalDate.now().toEpochDay()),
+                    expiry = d.getLong("expiryDay")?.let { day -> LocalDate.ofEpochDay(day) },
+                    qty = (d.getLong("qty") ?: 1L).toInt().coerceIn(1, 999),
                     added = d.getLong("added") ?: 0L,
                     photo = d.getString("photo") ?: ""
                 )
@@ -126,7 +134,26 @@ class Repo private constructor(ctx: Context) : Backend {
         }
         val c = col("freezerCategories").addSnapshotListener { snap, e ->
             if (e != null || snap == null) return@addSnapshotListener
-            _cats = snap.documents.mapNotNull { d -> d.getString("name") }.sortedBy { n -> n.lowercase() }
+            _cats = snap.documents.mapNotNull { d ->
+                val n = d.getString("name") ?: return@mapNotNull null
+                Triple(d.getLong("order") ?: 1000L, n, FreezerCat(d.id, n, d.getString("emoji") ?: catEmoji(n)))
+            }.sortedWith(compareBy({ t -> t.first }, { t -> t.second.lowercase() })).map { t -> t.third }
+        }
+        // First time: turn the built-in categories into real, editable ones.
+        val seed = col("settings").document("catsSeeded").addSnapshotListener { snap, e ->
+            if (e != null || snap == null) return@addSnapshotListener
+            if (!snap.exists() && !snap.metadata.isFromCache && !seeding) {
+                seeding = true
+                val b = db.batch()
+                DEFAULT_CATS.forEachIndexed { i, n ->
+                    b.set(
+                        col("freezerCategories").document(n.lowercase()),
+                        mapOf("name" to n, "emoji" to catEmoji(n), "order" to i.toLong())
+                    )
+                }
+                b.set(col("settings").document("catsSeeded"), mapOf("at" to System.currentTimeMillis()))
+                b.commit()
+            }
         }
         val b = col("settings").document("background").addSnapshotListener { snap, e ->
             if (e != null || snap == null) return@addSnapshotListener
@@ -142,7 +169,7 @@ class Repo private constructor(ctx: Context) : Backend {
                 }
             }
         }
-        regs = listOf(l, i, b, f, c)
+        regs = listOf(l, i, b, f, c, seed)
     }
 
     /** Saves a new background that everyone sees. */
@@ -195,28 +222,60 @@ class Repo private constructor(ctx: Context) : Backend {
 
     // ── Fryserdatabase ──
 
-    private fun saveCategory(raw: String) {
-        val c = raw.trim()
-        if (c.isEmpty()) return
-        if (DEFAULT_CATS.any { it.equals(c, true) } || _cats.any { it.equals(c, true) }) return
-        col("freezerCategories").document(c.lowercase().replace("/", "-")).set(mapOf("name" to c))
+    /** Creates a category and returns the name it is stored under. */
+    fun addCategory(name: String, emoji: String): String {
+        val n = name.trim()
+        if (n.isEmpty()) return ""
+        _cats.firstOrNull { it.name.equals(n, true) }?.let { return it.name }
+        col("freezerCategories").document(UUID.randomUUID().toString())
+            .set(mapOf("name" to n, "emoji" to emoji, "order" to System.currentTimeMillis()))
+        return n
     }
 
-    fun addFreezer(name: String, category: String, expiry: LocalDate, photo: String) {
-        saveCategory(category)
+    /** Renames / changes the emoji. Items in the category follow the new name. */
+    fun updateCategory(cat: FreezerCat, name: String, emoji: String) {
+        val n = name.trim().ifEmpty { cat.name }
+        val b = db.batch()
+        b.update(col("freezerCategories").document(cat.id), mapOf("name" to n, "emoji" to emoji))
+        if (n != cat.name) {
+            _freezer.filter { it.category.equals(cat.name, true) }
+                .forEach { x -> b.update(col("freezer").document(x.id), "category", n) }
+        }
+        b.commit()
+    }
+
+    /** Deletes the category. Items in it stay in the freezer, without a category. */
+    fun deleteCategory(cat: FreezerCat) {
+        val b = db.batch()
+        b.delete(col("freezerCategories").document(cat.id))
+        _freezer.filter { it.category.equals(cat.name, true) }
+            .forEach { x -> b.update(col("freezer").document(x.id), "category", "") }
+        b.commit()
+    }
+
+    fun addFreezer(name: String, category: String, expiry: LocalDate?, qty: Int, photo: String) {
         col("freezer").document(UUID.randomUUID().toString()).set(
             mapOf(
-                "name" to name, "category" to category, "expiryDay" to expiry.toEpochDay(),
-                "added" to System.currentTimeMillis(), "photo" to photo
+                "name" to name, "category" to category, "expiryDay" to expiry?.toEpochDay(),
+                "qty" to qty.toLong(), "added" to System.currentTimeMillis(), "photo" to photo
             )
         )
     }
 
-    fun updateFreezer(id: String, name: String, category: String, expiry: LocalDate, photo: String) {
-        saveCategory(category)
+    fun updateFreezer(id: String, name: String, category: String, expiry: LocalDate?, qty: Int, photo: String) {
         col("freezer").document(id).update(
-            mapOf("name" to name, "category" to category, "expiryDay" to expiry.toEpochDay(), "photo" to photo)
+            mapOf(
+                "name" to name, "category" to category, "expiryDay" to expiry?.toEpochDay(),
+                "qty" to qty.toLong(), "photo" to photo
+            )
         )
+    }
+
+    /** Adds or removes from the amount (never below 1; use "Ta ut av fryseren" to remove). */
+    fun changeQty(item: FreezerItem, delta: Int) {
+        val n = (item.qty + delta).coerceIn(1, 999)
+        if (n == item.qty) return
+        col("freezer").document(item.id).update("qty", n.toLong())
     }
 
     fun removeFreezer(ids: Collection<String>) {

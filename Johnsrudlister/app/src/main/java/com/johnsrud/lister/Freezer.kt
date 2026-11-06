@@ -13,6 +13,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,7 +43,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -85,7 +90,8 @@ fun catEmoji(c: String): String = when (c.lowercase()) {
 fun fmtDate(d: LocalDate): String = d.format(DATE_FMT)
 
 /** Text for the expiry date and how urgent it is: 0 = fine, 1 = soon, 2 = expired. */
-fun expiryInfo(d: LocalDate): Pair<String, Int> {
+fun expiryInfo(d: LocalDate?): Pair<String, Int> {
+    if (d == null) return Pair("Ingen utløpsdato", 0)
     val days = ChronoUnit.DAYS.between(LocalDate.now(), d)
     return when {
         days < 0 -> Pair("Utløpt for ${-days} ${if (-days == 1L) "dag" else "dager"} siden", 2)
@@ -160,7 +166,6 @@ fun preparePhoto(ctx: Context, uri: Uri): String? {
     }
 }
 
-// ───────────────────────── Små byggeklosser ─────────────────────────
 
 @Composable
 fun Chip(text: String, selected: Boolean, onClick: () -> Unit) {
@@ -198,36 +203,119 @@ fun SearchBar(value: String, onChange: (String) -> Unit) {
     }
 }
 
+// ───────────────────────── Små komponenter ─────────────────────────
+
+val FREEZER_EMOJI = listOf("🥩", "🐟", "🍞", "🍲", "🥡", "🍰", "🥦", "🍓", "🍕", "🧀", "🥛", "🍦", "🍗", "🥟", "🫐", "🧊")
+
+val SORT_LABELS = listOf("Tidligst utløpsdato", "Senest utløpsdato", "Høyest antall", "Lavest antall")
+
+/** Items without an expiry date always come last in the two date sorts. */
+fun freezerComparator(mode: Int): Comparator<FreezerItem> = Comparator { a, b ->
+    fun byDate(asc: Boolean): Int {
+        val x = a.expiry
+        val y = b.expiry
+        return when {
+            x == null && y == null -> 0
+            x == null -> 1
+            y == null -> -1
+            asc -> x.compareTo(y)
+            else -> y.compareTo(x)
+        }
+    }
+    val first = when (mode) {
+        0 -> byDate(true)
+        1 -> byDate(false)
+        2 -> b.qty.compareTo(a.qty)
+        else -> a.qty.compareTo(b.qty)
+    }
+    if (first != 0) first
+    else if (mode >= 2 && byDate(true) != 0) byDate(true)
+    else a.name.lowercase().compareTo(b.name.lowercase())
+}
+
+@Composable
+fun MiniBtn(kind: String, size: Int = 30, enabled: Boolean = true, onClick: () -> Unit) {
+    Box(
+        Modifier.size(size.dp).clip(RoundedCornerShape((size / 3).dp))
+            .background(if (enabled) P.accentSoft else P.border.copy(alpha = 0.5f))
+            .tap(enabled, onClick),
+        contentAlignment = Alignment.Center
+    ) { Ic(kind, if (enabled) P.accent else P.sub.copy(alpha = 0.4f), (size / 2).dp, 2.2f) }
+}
+
+@Composable
+fun Stepper(value: Int, onChange: (Int) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        MiniBtn("minus", 40, value > 1) { onChange(value - 1) }
+        T("$value", 20, FontWeight.SemiBold, Modifier.padding(horizontal = 18.dp), align = TextAlign.Center)
+        MiniBtn("plus", 40, value < 999) { onChange(value + 1) }
+    }
+}
+
+@Composable
+fun CatChip(text: String, selected: Boolean, onClick: () -> Unit, onEdit: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    val fg = if (selected) Color.White else P.text
+    Row(
+        Modifier.clip(shape)
+            .background(if (selected) P.accent else P.bg)
+            .border(1.dp, if (selected) P.accent else P.border, shape),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        T(text, 13, FontWeight.Medium, fg, Modifier.tap(onClick = onClick).padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 6.dp))
+        Box(Modifier.tap(onClick = onEdit).padding(start = 4.dp, end = 10.dp, top = 8.dp, bottom = 8.dp)) {
+            Ic("edit", if (selected) Color.White.copy(alpha = 0.85f) else P.sub, 14.dp, 1.6f)
+        }
+    }
+}
+
+@Composable
+fun DropButton(label: String, value: String, open: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(modifier) {
+        T(label, 12, FontWeight.Medium, P.sub)
+        Gap(h = 6)
+        Row(
+            Modifier.fillMaxWidth().clip(shape).background(P.card)
+                .border(1.dp, if (open) P.accent else P.border, shape)
+                .tap(onClick = onClick).padding(start = 14.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            T(value, 14, FontWeight.Medium, modifier = Modifier.weight(1f), maxLines = 1)
+            Ic("down", P.sub, 16.dp, 2f)
+        }
+    }
+}
+
 // ───────────────────────── Fryserdatabase ─────────────────────────
 
 @Composable
-fun FreezerScreen(r: Repo, tab: Int, onTab: (Int) -> Unit, onBackground: () -> Unit) {
+fun FreezerScreen(r: Repo, tab: Int, onTab: (Int) -> Unit) {
     var query by remember { mutableStateOf("") }
     var sortMode by remember { mutableIntStateOf(0) }
+    var catFilter by remember { mutableStateOf(setOf<String>()) }
+    var openMenu by remember { mutableIntStateOf(0) }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var showAdd by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<FreezerItem?>(null) }
     var menuFor by remember { mutableStateOf<FreezerItem?>(null) }
+    var editCat by remember { mutableStateOf<FreezerCat?>(null) }
+    var newCat by remember { mutableStateOf(false) }
 
     val all = r.freezer
-    val allCats = (DEFAULT_CATS + r.customCategories).distinctBy { c -> c.lowercase() }
+    val cats = r.categories
+    val activeFilter = catFilter.filter { f -> f.isEmpty() || cats.any { c -> c.name.lowercase() == f } }.toSet()
     val q = query.trim().lowercase()
     val shown = all.filter { x ->
-        q.isEmpty() || x.name.lowercase().contains(q) || x.category.lowercase().contains(q)
+        (q.isEmpty() || x.name.lowercase().contains(q) || x.category.lowercase().contains(q)) &&
+            (activeFilter.isEmpty() || x.category.lowercase() in activeFilter)
     }
-    val sorted = if (sortMode == 0) {
-        shown.sortedWith(compareBy<FreezerItem> { x -> x.expiry }.thenBy { x -> x.name.lowercase() })
-    } else {
-        shown.sortedWith(
-            compareBy<FreezerItem>(
-                { x -> allCats.indexOfFirst { c -> c.equals(x.category, true) }.let { n -> if (n < 0) Int.MAX_VALUE else n } },
-                { x -> x.expiry },
-                { x -> x.name.lowercase() }
-            )
-        )
-    }
+    val sorted = shown.sortedWith(freezerComparator(sortMode))
     val ids = all.map { x -> x.id }.toSet()
     val sel = selected.filter { id -> id in ids }.toSet()
+    val hasBlank = all.any { x -> x.category.isBlank() }
+
+    fun emojiOf(name: String): String = r.emojiFor(name)
 
     BackHandler(enabled = sel.isNotEmpty()) { selected = emptySet() }
 
@@ -242,45 +330,94 @@ fun FreezerScreen(r: Repo, tab: Int, onTab: (Int) -> Unit, onBackground: () -> U
                     Gap(h = 14)
                     SearchBar(query) { query = it }
                     Gap(h = 12)
-                    Segmented(listOf("Utløpsdato", "Kategori"), sortMode) { sortMode = it }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        DropButton("Sorter", SORT_LABELS[sortMode], openMenu == 1, Modifier.weight(1f)) {
+                            openMenu = if (openMenu == 1) 0 else 1
+                        }
+                        DropButton(
+                            "Kategori",
+                            when {
+                                activeFilter.isEmpty() -> "Alle"
+                                activeFilter.size == 1 -> cats.firstOrNull { c -> c.name.lowercase() == activeFilter.first() }?.name ?: "Uten kategori"
+                                else -> "${activeFilter.size} valgt"
+                            },
+                            openMenu == 2, Modifier.weight(1f)
+                        ) { openMenu = if (openMenu == 2) 0 else 2 }
+                    }
+                    if (openMenu != 0) {
+                        Gap(h = 8)
+                        val shape = RoundedCornerShape(18.dp)
+                        Column(Modifier.fillMaxWidth().clip(shape).background(P.card).border(1.dp, P.border, shape).padding(8.dp)) {
+                            if (openMenu == 1) {
+                                SORT_LABELS.forEachIndexed { i, label ->
+                                    Row(
+                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                            .tap { sortMode = i; openMenu = 0 }.padding(horizontal = 10.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        T(label, 15, if (i == sortMode) FontWeight.SemiBold else FontWeight.Normal,
+                                            if (i == sortMode) P.accent else P.text, Modifier.weight(1f))
+                                        if (i == sortMode) Ic("check", P.accent, 18.dp, 2.2f)
+                                    }
+                                }
+                            } else {
+                                cats.forEach { c ->
+                                    val on = c.name.lowercase() in activeFilter
+                                    Row(
+                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                            .tap { catFilter = if (on) activeFilter - c.name.lowercase() else activeFilter + c.name.lowercase() }
+                                            .padding(start = 10.dp, top = 4.dp, bottom = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        CheckCircle(on, 24.dp)
+                                        Gap(w = 12)
+                                        T(c.emoji + "  " + c.name, 15, modifier = Modifier.weight(1f), maxLines = 1)
+                                        IconBtn("edit") { editCat = c }
+                                    }
+                                }
+                                if (hasBlank) {
+                                    val on = "" in activeFilter
+                                    Row(
+                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                            .tap { catFilter = if (on) activeFilter - "" else activeFilter + "" }
+                                            .padding(horizontal = 10.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        CheckCircle(on, 24.dp)
+                                        Gap(w = 12)
+                                        T("Uten kategori", 15, color = P.sub, modifier = Modifier.weight(1f))
+                                    }
+                                }
+                                T(
+                                    "+ Ny kategori", 14, FontWeight.Medium, P.accent,
+                                    Modifier.fillMaxWidth().tap { newCat = true }.padding(horizontal = 10.dp, vertical = 12.dp)
+                                )
+                                Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
+                                    T("Nullstill", 14, FontWeight.Medium, P.sub, Modifier.tap { catFilter = emptySet() }.padding(vertical = 6.dp))
+                                    Spacer(Modifier.weight(1f))
+                                    T("Ferdig", 14, FontWeight.SemiBold, P.accent, Modifier.tap { openMenu = 0 }.padding(vertical = 6.dp))
+                                }
+                            }
+                        }
+                    }
                     Gap(h = 4)
                 }
             }
             if (sorted.isEmpty()) {
                 item {
                     if (all.isEmpty()) Empty("Fryseren er tom", "Trykk + når du legger noe nytt i fryseren.")
-                    else Empty("Ingen treff", "Prøv et annet søk.")
-                }
-            } else if (sortMode == 0) {
-                items(sorted, key = { x -> x.id }) { x ->
-                    FreezerRow(
-                        item = x, selected = x.id in sel,
-                        onToggle = { selected = if (x.id in sel) sel - x.id else sel + x.id },
-                        onMenu = { menuFor = x }
-                    )
+                    else Empty("Ingen treff", "Prøv et annet søk eller en annen kategori.")
                 }
             } else {
-                val groups = sorted.groupBy { x -> x.category.ifBlank { "Uten kategori" } }
-                groups.forEach { (cat, group) ->
-                    item(key = "h_$cat") {
-                        Row(Modifier.padding(top = 10.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                            T(catEmoji(cat), 14)
-                            Gap(w = 8)
-                            T(cat.uppercase(), 11, FontWeight.SemiBold, P.sub, spacing = 1f)
-                            Gap(w = 8)
-                            T("${group.size}", 11, FontWeight.Medium, P.sub)
-                        }
-                    }
-                    items(group, key = { x -> x.id }) { x ->
-                        FreezerRow(
-                            item = x, selected = x.id in sel,
-                            onToggle = { selected = if (x.id in sel) sel - x.id else sel + x.id },
-                            onMenu = { menuFor = x }
-                        )
-                    }
+                items(sorted, key = { x -> x.id }) { x ->
+                    FreezerRow(
+                        item = x, emoji = emojiOf(x.category), selected = x.id in sel,
+                        onToggle = { selected = if (x.id in sel) sel - x.id else sel + x.id },
+                        onMenu = { menuFor = x },
+                        onQty = { d -> r.changeQty(x, d) }
+                    )
                 }
             }
-            item { BgLink(onBackground) }
         }
 
         if (sel.isEmpty()) {
@@ -314,19 +451,21 @@ fun FreezerScreen(r: Repo, tab: Int, onTab: (Int) -> Unit, onBackground: () -> U
     }
 
     if (showAdd) FreezerDialog(
-        item = null, cats = allCats, onDismiss = { showAdd = false },
-        onSave = { n, c, d, p -> r.addFreezer(n, c, d, p); showAdd = false }
+        item = null, r = r, onDismiss = { showAdd = false },
+        onSave = { n, c, d, qty, p -> r.addFreezer(n, c, d, qty, p); showAdd = false }
     )
     editing?.let { m ->
         FreezerDialog(
-            item = m, cats = allCats, onDismiss = { editing = null },
-            onSave = { n, c, d, p -> r.updateFreezer(m.id, n, c, d, p); editing = null }
+            item = m, r = r, onDismiss = { editing = null },
+            onSave = { n, c, d, qty, p -> r.updateFreezer(m.id, n, c, d, qty, p); editing = null }
         )
     }
+    editCat?.let { c -> CategoryDialog(r, c, onDismiss = { editCat = null }) }
+    if (newCat) CategoryDialog(r, null, onDismiss = { newCat = false })
     menuFor?.let { m ->
         Sheet(onDismiss = { menuFor = null }) {
             Row(Modifier.padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                EmojiTile(catEmoji(m.category), 40.dp)
+                EmojiTile(emojiOf(m.category), 40.dp)
                 Gap(w = 12)
                 T(m.name, 17, FontWeight.SemiBold, maxLines = 1)
             }
@@ -341,9 +480,13 @@ fun FreezerScreen(r: Repo, tab: Int, onTab: (Int) -> Unit, onBackground: () -> U
 }
 
 @Composable
-fun FreezerRow(item: FreezerItem, selected: Boolean, onToggle: () -> Unit, onMenu: () -> Unit) {
+fun FreezerRow(
+    item: FreezerItem, emoji: String, selected: Boolean,
+    onToggle: () -> Unit, onMenu: () -> Unit, onQty: (Int) -> Unit
+) {
     val shape = RoundedCornerShape(22.dp)
-    val info = expiryInfo(item.expiry)
+    val exp = item.expiry
+    val info = expiryInfo(exp)
     val expColor = when (info.second) {
         2 -> P.danger
         1 -> Color(0xFFF5A524)
@@ -363,17 +506,115 @@ fun FreezerRow(item: FreezerItem, selected: Boolean, onToggle: () -> Unit, onMen
             contentAlignment = Alignment.Center
         ) {
             if (photo != null) Image(photo, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            else T(catEmoji(item.category), 26)
+            else T(emoji, 26)
         }
         Gap(w = 14)
         Column(Modifier.weight(1f)) {
             T(item.name, 16, FontWeight.SemiBold, maxLines = 1)
             T(info.first, 13, FontWeight.Medium, expColor)
-            if (item.category.isNotBlank()) T(item.category, 12, color = P.sub)
+            if (item.category.isNotBlank()) T(item.category, 12, color = P.sub, maxLines = 1)
+            Gap(h = 6)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                T("Antall", 12, color = P.sub)
+                Gap(w = 10)
+                MiniBtn("minus", 30, item.qty > 1) { onQty(-1) }
+                T("${item.qty}", 15, FontWeight.SemiBold, Modifier.padding(horizontal = 12.dp))
+                MiniBtn("plus", 30, item.qty < 999) { onQty(1) }
+            }
         }
         CheckCircle(selected)
         Gap(w = 2)
         IconBtn("more", onClick = onMenu)
+    }
+}
+
+// ───────────────────────── Kategorier ─────────────────────────
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+fun CategoryDialog(
+    r: Repo, cat: FreezerCat?, onDismiss: () -> Unit,
+    onSaved: (String) -> Unit = {}, onDeleted: () -> Unit = {}
+) {
+    var name by remember { mutableStateOf(cat?.name ?: "") }
+    var emoji by remember { mutableStateOf(cat?.emoji ?: "🧊") }
+    var confirmDelete by remember { mutableStateOf(false) }
+    val focus = remember { FocusRequester() }
+    val kb = LocalSoftwareKeyboardController.current
+
+    Sheet(onDismiss = onDismiss) {
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            T(if (cat == null) "Ny kategori" else "Rediger kategori", 22, FontWeight.SemiBold, spacing = -0.5f)
+            Gap(h = 18)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(72.dp).clip(RoundedCornerShape(24.dp)).background(P.accentSoft)
+                        .border(1.dp, P.accent.copy(alpha = 0.45f), RoundedCornerShape(24.dp))
+                        .tap { focus.requestFocus(); kb?.show() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    BasicTextField(
+                        value = emoji,
+                        onValueChange = { nv -> val g = lastGrapheme(nv); if (g.isNotBlank()) emoji = g },
+                        textStyle = TextStyle(fontSize = 34.sp, textAlign = TextAlign.Center, color = P.text),
+                        singleLine = true, cursorBrush = SolidColor(Color.Transparent),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).focusRequester(focus)
+                    )
+                }
+                Gap(w = 14)
+                Column {
+                    T("Ikon", 15, FontWeight.SemiBold)
+                    T("For å velge en annen emoji, trykk på ruten for å velge din egen", 12, color = P.sub)
+                }
+            }
+            Gap(h = 12)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FREEZER_EMOJI.forEach { e ->
+                    Box(
+                        Modifier.size(40.dp).clip(RoundedCornerShape(13.dp))
+                            .background(if (e == emoji) P.accentSoft else P.bg)
+                            .border(1.dp, if (e == emoji) P.accent else P.border, RoundedCornerShape(13.dp))
+                            .tap { emoji = e },
+                        contentAlignment = Alignment.Center
+                    ) { T(e, 20) }
+                }
+            }
+            Gap(h = 18)
+            Field("Navn", name, "F.eks. Grønnsaker") { name = it }
+            Gap(h = 22)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                PillButton("Avbryt", Modifier.weight(1f), filled = false, onClick = onDismiss)
+                PillButton("Lagre", Modifier.weight(1f), enabled = name.isNotBlank()) {
+                    if (cat == null) onSaved(r.addCategory(name, emoji))
+                    else {
+                        r.updateCategory(cat, name, emoji)
+                        onSaved(name.trim())
+                    }
+                    onDismiss()
+                }
+            }
+            if (cat != null) {
+                T(
+                    "Slett kategori", 14, FontWeight.Medium, P.danger,
+                    Modifier.tap { confirmDelete = true }.padding(top = 16.dp, bottom = 2.dp)
+                )
+            }
+        }
+    }
+    if (confirmDelete && cat != null) Sheet(onDismiss = { confirmDelete = false }) {
+        T("Slette kategorien?", 20, FontWeight.SemiBold)
+        Gap(h = 8)
+        T("«${cat.name}» fjernes. Det som ligger i fryseren i denne kategorien blir værende, men uten kategori.", 14, color = P.sub)
+        Gap(h = 20)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            PillButton("Avbryt", Modifier.weight(1f), filled = false) { confirmDelete = false }
+            PillButton("Slett", Modifier.weight(1f), color = P.danger) {
+                r.deleteCategory(cat)
+                confirmDelete = false
+                onDeleted()
+                onDismiss()
+            }
+        }
     }
 }
 
@@ -382,20 +623,22 @@ fun FreezerRow(item: FreezerItem, selected: Boolean, onToggle: () -> Unit, onMen
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun FreezerDialog(
-    item: FreezerItem?, cats: List<String>, onDismiss: () -> Unit,
-    onSave: (String, String, LocalDate, String) -> Unit
+    item: FreezerItem?, r: Repo, onDismiss: () -> Unit,
+    onSave: (String, String, LocalDate?, Int, String) -> Unit
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val cats = r.categories
     var name by remember { mutableStateOf(item?.name ?: "") }
     var category by remember { mutableStateOf(item?.category ?: "") }
-    var expiry by remember { mutableStateOf(item?.expiry ?: LocalDate.now().plusMonths(3)) }
+    var expiry by remember { mutableStateOf(item?.expiry) }   // no date is chosen automatically
+    var qty by remember { mutableIntStateOf(item?.qty ?: 1) }
     var photo by remember { mutableStateOf(item?.photo ?: "") }
     var busy by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
-    var newCat by remember { mutableStateOf(false) }
-    var newCatText by remember { mutableStateOf("") }
     var showDate by remember { mutableStateOf(false) }
+    var newCat by remember { mutableStateOf(false) }
+    var editCat by remember { mutableStateOf<FreezerCat?>(null) }
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
     val preview = remember(photo) { decodePhoto(photo) }
 
@@ -471,7 +714,12 @@ fun FreezerDialog(
             Field("Navn", name, "Uten navn") { name = it }
             Gap(h = 18)
 
-            T("Utløpsdato", 12, FontWeight.Medium, P.sub)
+            T("Antall", 12, FontWeight.Medium, P.sub)
+            Gap(h = 8)
+            Stepper(qty) { qty = it }
+            Gap(h = 18)
+
+            T("Utløpsdato (valgfritt)", 12, FontWeight.Medium, P.sub)
             Gap(h = 6)
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(P.bg)
@@ -479,8 +727,12 @@ fun FreezerDialog(
                     .tap { showDate = true }.padding(horizontal = 14.dp, vertical = 13.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                T(fmtDate(expiry), 16, modifier = Modifier.weight(1f))
-                T("Endre", 13, FontWeight.Medium, P.accent)
+                val e = expiry
+                T(
+                    if (e == null) "Ingen utløpsdato" else fmtDate(e), 16,
+                    color = if (e == null) P.sub.copy(alpha = 0.8f) else P.text, modifier = Modifier.weight(1f)
+                )
+                T(if (e == null) "Velg" else "Endre", 13, FontWeight.Medium, P.accent)
             }
             Gap(h = 10)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -489,40 +741,44 @@ fun FreezerDialog(
                     Chip(label, expiry == target) { expiry = target }
                 }
             }
+            if (expiry != null) {
+                T(
+                    "Fjern utløpsdato", 13, FontWeight.Medium, P.danger,
+                    Modifier.tap { expiry = null }.padding(top = 10.dp, bottom = 2.dp)
+                )
+            }
             Gap(h = 18)
 
             T("Kategori", 12, FontWeight.Medium, P.sub)
             Gap(h = 8)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 cats.forEach { c ->
-                    Chip(catEmoji(c) + " " + c, !newCat && category.equals(c, true)) {
-                        category = if (category.equals(c, true)) "" else c
-                        newCat = false
-                    }
+                    CatChip(
+                        c.emoji + " " + c.name, category.equals(c.name, true),
+                        onClick = { category = if (category.equals(c.name, true)) "" else c.name },
+                        onEdit = { editCat = c }
+                    )
                 }
-                Chip("+ Ny kategori", newCat) {
-                    newCat = !newCat
-                    newCatText = ""
-                    category = ""
-                }
-            }
-            if (newCat) {
-                Gap(h = 10)
-                Field("Skriv inn kategori", newCatText, "F.eks. Grønnsaker") {
-                    newCatText = it
-                    category = it.trim()
-                }
+                Chip("+ Ny kategori", false) { newCat = true }
             }
             Gap(h = 22)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 PillButton("Avbryt", Modifier.weight(1f), filled = false, enabled = !busy, onClick = onDismiss)
                 PillButton("Lagre", Modifier.weight(1f), enabled = !busy) {
-                    onSave(name.trim().ifEmpty { "Uten navn" }, category.trim(), expiry, photo)
+                    onSave(name.trim().ifEmpty { "Uten navn" }, category.trim(), expiry, qty, photo)
                 }
             }
         }
     }
-    if (showDate) DateSheet(expiry, { showDate = false }) { expiry = it }
+    if (showDate) DateSheet(expiry ?: LocalDate.now(), { showDate = false }) { expiry = it }
+    if (newCat) CategoryDialog(r, null, onDismiss = { newCat = false }, onSaved = { n -> category = n })
+    editCat?.let { c ->
+        CategoryDialog(
+            r, c, onDismiss = { editCat = null },
+            onSaved = { n -> if (category.equals(c.name, true)) category = n },
+            onDeleted = { if (category.equals(c.name, true)) category = "" }
+        )
+    }
 }
 
 @Composable
